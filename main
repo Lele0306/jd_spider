@@ -1,0 +1,470 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+import time
+import pickle
+import os
+
+class JDSpider:
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Referer': 'https://www.jd.com'
+        }
+        self.cookie_file = 'jd_cookies.pkl'
+
+    def save_cookies(self, driver):
+        """保存cookies"""
+        try:
+            driver.get("https://www.jd.com")
+            time.sleep(2)
+            cookies = driver.get_cookies()
+            filtered_cookies = []
+            for cookie in cookies:
+                filtered_cookie = {
+                    'name': cookie['name'],
+                    'value': cookie['value'],
+                    'path': cookie['path']
+                }
+                if 'domain' in cookie:
+                    filtered_cookie['domain'] = cookie['domain']
+                filtered_cookies.append(filtered_cookie)
+
+            with open(self.cookie_file, 'wb') as f:
+                pickle.dump(filtered_cookies, f)
+                print("Cookies保存成功!")
+        except Exception as e:
+            print(f"保存Cookies出错: {e}")
+
+    def load_cookies(self, driver):
+        """加载cookies"""
+        try:
+            if os.path.exists(self.cookie_file):
+                driver.get("https://www.jd.com")
+                time.sleep(2)
+                with open(self.cookie_file, 'rb') as f:
+                    cookies = pickle.load(f)
+                for cookie in cookies:
+                    try:
+                        driver.add_cookie(cookie)
+                    except Exception as e:
+                        print(f"添加单个cookie出错: {e}")
+                        continue
+                print("Cookies加载成功!")
+                return True
+            return False
+        except Exception as e:
+            print(f"加载Cookies出错: {e}")
+            if os.path.exists(self.cookie_file):
+                os.remove(self.cookie_file)
+            return False
+
+    def login(self, driver):
+        """登录处理"""
+        try:
+            print("开始登录流程...")
+            driver.get("https://passport.jd.com/new/login.aspx")
+            print("\n请在打开的浏览器窗口中手动登录京东...")
+            print("登录后请在这里输入任意字符并按回车继续：")
+            input()
+
+            if self.check_login_status(driver):
+                print("登录成功！正在保存cookies...")
+                self.save_cookies(driver)
+                print("Cookies保存成功！")
+                return True
+            else:
+                print("登录失败，请检查是否正确登录")
+                return False
+
+        except Exception as e:
+            print(f"登录过程出错: {e}")
+            return False
+
+    def check_login_status(self, driver):
+        """检查是否已登录"""
+        try:
+            driver.get("https://home.jd.com/")
+            time.sleep(3)
+
+            # 检查URL是否包含login
+            if "login" in driver.current_url.lower():
+                return False
+
+            # 尝试多种可能的登录状态标识
+            try:
+                # 检查是否存在用户名元素
+                username_elements = driver.find_elements(By.CLASS_NAME, "user-name")
+                if username_elements:
+                    return True
+
+                # 检查是否存在用户信息元素
+                nickname_elements = driver.find_elements(By.CLASS_NAME, "nickname")
+                if nickname_elements:
+                    return True
+
+                # 检查是否存在登出按钮
+                logout_elements = driver.find_elements(By.LINK_TEXT, "退出")
+                if logout_elements:
+                    return True
+
+                return False
+            except:
+                return False
+
+        except Exception as e:
+            print(f"检查登录状态时出错: {e}")
+            return False
+
+    def extract_product_info(self, item, keyword, driver):
+        """从商品项中提取信息"""
+        try:
+            product = {}
+
+            # 提取商品名称
+            name_element = self.find_element_with_selectors(item, [
+                ".p-name-type-2 a em",
+                ".p-name a em",
+                ".p-name-type-2 em",
+                ".p-name em"
+            ])
+            if not name_element:
+                print("未找到商品名称")
+                return None
+            product['name'] = name_element.text.strip()
+            print(f"商品名称: {product['name'][:30]}...")
+
+            # 提取商品价格
+            price_element = self.find_element_with_selectors(item, [
+                ".p-price strong i",
+                ".p-price strong",
+                "span.price"
+            ])
+            if not price_element:
+                print("未找到价格")
+                return None
+            price_text = price_element.text.strip()
+            product['price'] = float(price_text)
+            print(f"价格: {product['price']}")
+
+            # 提取评论数量
+            try:
+                comment_element = self.find_element_with_selectors(item, [
+                    ".p-commit strong a",
+                    ".p-commit strong",
+                    ".p-commit a",
+                    ".evaluate"
+                ])
+                if comment_element:
+                    comment_text = comment_element.text.strip()
+                    # 处理不同格式的评论数量
+                    if '万+' in comment_text:
+                        comment_count = float(comment_text.replace('万+', '')) * 10000
+                    elif '+' in comment_text:
+                        comment_count = float(comment_text.replace('+', ''))
+                    else:
+                        # 移除可能的非数字字符（如"条评论"）
+                        comment_text = ''.join(filter(str.isdigit, comment_text))
+                        comment_count = float(comment_text) if comment_text else 0
+                    product['comments_count'] = int(comment_count)
+                    print(f"评论数量: {product['comments_count']}")
+                else:
+                    product['comments_count'] = 0
+                    print("未找到评论数量")
+            except Exception as e:
+                print(f"获取评论数量失败: {e}")
+                product['comments_count'] = 0
+
+            product['keyword'] = keyword
+            return product
+
+        except Exception as e:
+            print(f"提取商品信息时出错: {e}")
+            return None
+
+    def find_element_with_selectors(self, item, selectors):
+        """使用多个选择器尝试查找元素"""
+        for selector in selectors:
+            try:
+                element = item.find_element(By.CSS_SELECTOR, selector)
+                if element:
+                    return element
+            except:
+                continue
+        return None
+
+    def get_product_info(self, keyword, pages=3):
+        """爬取商品信息"""
+        products = []
+
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.maximize_window()
+
+        try:
+            # 首先尝试加载已保存的cookies
+            cookies_loaded = self.load_cookies(driver)
+            if cookies_loaded:
+                # 刷新页面使cookies生效
+                driver.get("https://www.jd.com")
+                time.sleep(2)
+
+                # 验证登录状态
+                if self.check_login_status(driver):
+                    print("Cookie有效，已成功登录！")
+                else:
+                    print("Cookie已失效，需要重新登录...")
+                    if not self.login(driver):
+                        print("登录失败!")
+                        return pd.DataFrame()
+            else:
+                print("未找到有效的Cookie，需要登录...")
+                if not self.login(driver):
+                    print("登录失败!")
+                    return pd.DataFrame()
+
+            for page in range(1, pages + 1):
+                url = f'https://search.jd.com/Search?keyword={keyword}&page={2 * page - 1}'
+                print(f"正在爬取第 {page} 页，关键词为 {keyword}...")
+
+                driver.get(url)
+                time.sleep(5)
+
+                for i in range(3):
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2)
+
+                items = driver.find_elements(By.CLASS_NAME, "gl-item")
+                print(f"在第 {page} 页找到 {len(items)} 个商品")
+
+                for index, item in enumerate(items, 1):
+                    print(f"\n处理第 {index} 个商品")
+                    product = self.extract_product_info(item, keyword, driver)
+                    if product:
+                        products.append(product)
+                        print("商品信息添加成功")
+
+                print(f"第 {page} 页完成，目前共获取 {len(products)} 个商品")
+                time.sleep(3)
+
+        except Exception as e:
+            print(f"爬取过程中出错: {e}")
+
+        finally:
+            driver.quit()
+
+        df = pd.DataFrame(products)
+        if not df.empty:
+            print(f"\n{keyword} 数据爬取摘要:")
+            print(df.info())
+            df.to_csv(f'jd_{keyword}_data.csv', index=False, encoding='utf-8-sig')
+        else:
+            print(f"未收集到 {keyword} 的数据")
+
+        return df
+
+
+class DataAnalyzer:
+    def __init__(self, df):
+        self.df = df
+        print("\n初始数据形状:", self.df.shape)
+        if not self.df.empty:
+            print("\n列名:", self.df.columns.tolist())
+
+    def clean_data(self):
+        """数据清洗"""
+        if self.df.empty:
+            print("没有数据需要清洗")
+            return
+
+        print("\n开始数据清洗...")
+        print("清洗前数据量:", len(self.df))
+
+        self.df.drop_duplicates(inplace=True)
+        self.df.dropna(subset=['price', 'comments_count'], inplace=True)
+
+        self.df['price'] = pd.to_numeric(self.df['price'], errors='coerce')
+        self.df['comments_count'] = pd.to_numeric(self.df['comments_count'], errors='coerce')
+
+        # 添加价格区间分类
+        self.df['price_range'] = pd.cut(self.df['price'],
+                                        bins=[0, 100, 300, 500, 1000, float('inf')],
+                                        labels=['0-100', '100-300', '300-500', '500-1000', '1000+'])
+
+        # 添加评论数量分类
+        self.df['comment_level'] = pd.cut(self.df['comments_count'],
+                                          bins=[0, 1000, 5000, 10000, float('inf')],
+                                          labels=['极少(0-1k)', '中等(1k-5k)', '较多(5k-10k)', '火热(10k+)'])
+
+        self.df = self.df[self.df['price'] > 0]
+        self.df = self.df[self.df['comments_count'] >= 0]
+
+        print("清洗后数据量:", len(self.df))
+
+    def analyze_data(self):
+        """分析数据"""
+        if self.df.empty:
+            print("没有数据可分析")
+            return
+
+        print("\n=== 数据分析 ===")
+
+        print("\n基本统计信息:")
+        print(self.df[['price', 'comments_count']].describe())
+
+        print("\n价格区间分布:")
+        print(self.df['price_range'].value_counts())
+
+        print("\n评论数量级别分布:")
+        print(self.df['comment_level'].value_counts())
+
+        self.create_visualizations()
+
+    def create_visualizations(self):
+        """创建可视化图表"""
+        if self.df.empty:
+            print("没有数据可供可视化")
+            return
+
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        # 1. 价格区间分布饼图
+        plt.figure(figsize=(10, 8))
+        price_dist = self.df['price_range'].value_counts()
+        colors = ['#ff9999', '#66b3ff', '#99ff99', '#ffcc99', '#ff99cc']
+        plt.pie(price_dist, labels=price_dist.index, autopct='%1.1f%%',
+                startangle=90, colors=colors)
+        plt.title('商品价格区间分布')
+        plt.axis('equal')
+        plt.savefig('价格区间分布.png', bbox_inches='tight', dpi=300)
+        plt.close()
+
+        # 2. 评论数量级别占比柱状图
+        plt.figure(figsize=(12, 6))
+        comment_dist = self.df['comment_level'].value_counts()
+        plt.bar(comment_dist.index, comment_dist.values, color='#66b3ff')
+        plt.title('评论数量级别分布')
+        plt.xlabel('评论数量级别')
+        plt.ylabel('商品数量')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig('评论分布.png', bbox_inches='tight', dpi=300)
+        plt.close()
+
+        # 3. 价格区间的评论数量箱线图
+        plt.figure(figsize=(12, 6))
+        self.df.boxplot(column='comments_count', by='price_range', figsize=(12, 6))
+        plt.title('各价格区间的评论数量分布')
+        plt.suptitle('')  # 删除自动生成的标题
+        plt.xlabel('价格区间')
+        plt.ylabel('评论数量')
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig('价格区间评论箱线图.png', bbox_inches='tight', dpi=300)
+        plt.close()
+
+        # 4. 评论数量和价格的趋势图
+        plt.figure(figsize=(12, 6))
+        avg_by_price = self.df.groupby('price_range',observed=True).agg({
+            'comments_count': 'mean',
+            'price': 'mean'
+        }).reset_index()
+
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+        ax2 = ax1.twinx()
+
+        line1 = ax1.plot(avg_by_price['price_range'],
+                        avg_by_price['comments_count'],
+                        'b-', marker='o', label='平均评论数')
+        line2 = ax2.plot(avg_by_price['price_range'],
+                        avg_by_price['price'],
+                        'r-', marker='s', label='平均价格')
+
+        ax1.set_xlabel('价格区间')
+        ax1.set_ylabel('平均评论数', color='b')
+        ax2.set_ylabel('平均价格', color='r')
+
+        plt.title('价格区间的平均评论数和价格趋势')
+        plt.xticks(rotation=45)
+
+        # 合并两个y轴的图例
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+        ax1.legend(lines, labels, loc='upper left')
+
+        plt.tight_layout()
+        plt.savefig('价格评论趋势图.png', bbox_inches='tight', dpi=300)
+        plt.close()
+
+
+def main():
+    spider = JDSpider()
+
+    print("\n=== 京东商品数据爬取与分析程序 ===")
+    print("请输入要搜索的关键词（多个关键词用逗号分隔）：")
+    keywords_input = input().strip()
+
+    # 将输入的关键词分割成列表
+    keywords = [k.strip() for k in keywords_input.split(',') if k.strip()]
+
+    if not keywords:
+        print("未输入有效的关键词！")
+        return
+
+    print("\n请输入要爬取的页数（默认为3页）：")
+    try:
+        pages = int(input().strip() or "3")
+        if pages < 1:
+            print("页数必须大于0，将使用默认值3页")
+            pages = 3
+    except ValueError:
+        print("输入的页数无效，将使用默认值3页")
+        pages = 3
+
+    all_data = []
+    for keyword in keywords:
+        print(f"\n正在爬取 {keyword} 的数据...")
+        df = spider.get_product_info(keyword, pages)
+        if not df.empty:
+            all_data.append(df)
+
+    if all_data:
+        # 合并所有数据
+        all_data = pd.concat(all_data, ignore_index=True)
+        print("\n总数据量:", all_data.shape)
+
+        # 创建分析器并进行分析
+        analyzer = DataAnalyzer(all_data)
+        analyzer.clean_data()
+        analyzer.analyze_data()
+        print("\n数据分析完成，图表已保存")
+
+        # 询问是否要查看详细的数据统计
+        print("\n是否需要查看详细的数据统计信息？(y/n):")
+        if input().strip().lower() == 'y':
+            print("\n=== 详细数据统计 ===")
+            print("\n按关键词统计的平均价格和评论数：")
+            keyword_stats = all_data.groupby('keyword').agg({
+                'price': ['mean', 'min', 'max', 'count'],
+                'comments_count': ['mean', 'min', 'max']
+            })
+            print(keyword_stats)
+
+            print("\n价格区间分布：")
+            print(all_data['price_range'].value_counts(normalize=True).mul(100).round(2).astype(str) + '%')
+
+            print("\n评论数量分布：")
+            print(all_data['comment_level'].value_counts(normalize=True).mul(100).round(2).astype(str) + '%')
+    else:
+        print("未收集到任何数据")
+
+
+if __name__ == "__main__":
+    main()
